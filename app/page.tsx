@@ -29,7 +29,7 @@ const CATEGORY_LABELS = {
 } as const;
 
 const CATEGORY_ORDER = Object.keys(CATEGORY_LABELS) as Category[];
-const STORAGE_KEY_ENTRIES = "fire-assistant-entries-v1";
+const STORAGE_KEY_ENTRIES = "fire-assistant-entries-v2";
 const GOLD_COLOR = "#c4b590";
 const MONTHLY_WORK_HOURS = 21.75 * 8;
 
@@ -38,6 +38,7 @@ type Category = keyof typeof CATEGORY_LABELS;
 type ExpenseEntry = {
   id: string;
   description: string;
+  note?: string;
   amount: number;
   category: Category;
   createdAt: string;
@@ -47,14 +48,12 @@ type ExpenseEntry = {
 };
 
 type ChatMessage =
-  | { id: string; role: "user" | "assistant"; kind: "text"; text: string }
-  | { id: string; role: "assistant"; kind: "entries"; entries: ExpenseEntry[] };
+  | { id: string; role: "user" | "assistant"; kind: "text"; text: string };
 
 type CategorySummary = Record<Category, number>;
 type SpendCategory = Exclude<Category, "克制与战利品">;
 type SpendSummary = Record<SpendCategory, number>;
 type DashboardMode = "biweekly" | "eightWeek";
-type TrendChartMode = "line" | "stackedBar";
 type TrendPeriod = {
   label: string;
   start: string;
@@ -162,6 +161,10 @@ const REALITY_TAG_GROUPS: RealityTagGroup[] = [
 ];
 
 const ALL_REALITY_TAGS = REALITY_TAG_GROUPS.flatMap((group) => group.tags);
+const EXPENSE_GUIDE_TEXT =
+  "记账示例（3步）\n1）先选「心理动机」：你当时为什么想花这笔钱。\n2）再选「心理属性」：这笔支出属于生存刚需 / 情绪补偿 / 社交认同 / 自我成长。\n3）最后选「实际类目」：它在现实中属于哪一类消费。\n例如：🪫 疲惫/回血 → 情绪补偿 → 餐饮/日用/蔬果 → 金额 28。\n若是省钱行为，请切到「克制」并记录本次克制金额。";
+const SAVING_GUIDE_TEXT =
+  "克制示例（2步）\n1）切换到「克制」后，先选一个克制标签（如：忍住没买 / 延迟购买）。\n2）填写本次克制金额，记录你这次没有花出去的钱。\n例如：🛑 延迟购买 → 本次克制金额 35。\n这笔金额会进入克制努力统计，但不会计入资产增长。";
 
 function buildId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
@@ -210,12 +213,11 @@ function toWorkTime(amount: number, hourlyWage: number) {
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState<"chat" | "dashboard" | "fire">("chat");
   const [dashboardMode, setDashboardMode] = useState<DashboardMode>("biweekly");
-  const [trendChartMode, setTrendChartMode] = useState<TrendChartMode>("line");
-  const [monthlySalary, setMonthlySalary] = useState(9000);
-  const [currentSavings, setCurrentSavings] = useState(40000);
-  const [monthlyInvest, setMonthlyInvest] = useState(3000);
-  const [retireMonthlyExpense, setRetireMonthlyExpense] = useState(3000);
-  const [annualReturnRate, setAnnualReturnRate] = useState(1.5);
+  const [monthlySalary, setMonthlySalary] = useState("");
+  const [currentSavings, setCurrentSavings] = useState("");
+  const [monthlyInvest, setMonthlyInvest] = useState("");
+  const [retireMonthlyExpense, setRetireMonthlyExpense] = useState("");
+  const [annualReturnRate, setAnnualReturnRate] = useState("");
   const [entries, setEntries] = useState<ExpenseEntry[]>([]);
   const [recordMode, setRecordMode] = useState<"expense" | "saving">("expense");
   const [tagAmount, setTagAmount] = useState("");
@@ -242,7 +244,7 @@ export default function HomePage() {
       id: "m-hello",
       role: "assistant",
       kind: "text",
-      text: "选择标签开始记录。"
+      text: EXPENSE_GUIDE_TEXT
     }
   ]);
 
@@ -258,7 +260,8 @@ export default function HomePage() {
       if (Array.isArray(parsed)) {
         const migrated = parsed.map((entry) => ({
           ...entry,
-          category: normalizeCategory(String(entry.category || ""))
+          category: normalizeCategory(String(entry.category || "")),
+          note: typeof (entry as Partial<ExpenseEntry>).note === "string" ? (entry as Partial<ExpenseEntry>).note : ""
         }));
         setEntries(migrated);
       } else {
@@ -309,9 +312,15 @@ export default function HomePage() {
     [categorySummary]
   );
 
+  const monthlySalaryValue = Math.max(Number(monthlySalary) || 0, 0);
+  const currentSavingsValue = Math.max(Number(currentSavings) || 0, 0);
+  const monthlyInvestValue = Math.max(Number(monthlyInvest) || 0, 0);
+  const retireMonthlyExpenseValue = Math.max(Number(retireMonthlyExpense) || 0, 0);
+  const annualReturnRateValue = Math.min(Math.max(Number(annualReturnRate) || 0, 0), 5);
+
   const activeSummary = reviewSummary ?? liveSpendSummary;
   const unconsciousSpend = activeSummary["情绪补偿"];
-  const realHourlyWage = monthlySalary > 0 ? monthlySalary / MONTHLY_WORK_HOURS : 0;
+  const realHourlyWage = monthlySalaryValue > 0 ? monthlySalaryValue / MONTHLY_WORK_HOURS : 0;
   const unconsciousWorkHours = realHourlyWage > 0 ? unconsciousSpend / realHourlyWage : 0;
   const warningThreshold = 120;
 
@@ -418,17 +427,52 @@ export default function HomePage() {
 
   const eightWeekTrendData = eightWeekTrend.periods.map((period) => ({
     period: period.label,
-    unconscious: Number(period.summary["情绪补偿"].toFixed(2)),
-    trophy: Number(period.summary["克制与战利品"].toFixed(2))
+    unconscious: Number(period.summary["情绪补偿"].toFixed(2))
   }));
 
+  const eightWeekTrophyStacked = useMemo(() => {
+    const presetKeys = SAVING_TAGS.map((tag) => tag.label);
+    const dynamicKeys = new Set<string>(presetKeys);
+    const data = eightWeekTrend.periods.map((period) => {
+      const periodStart = new Date(period.start).getTime();
+      const periodEnd = new Date(period.end).getTime();
+      const bucket: Record<string, number> = {};
+      presetKeys.forEach((key) => {
+        bucket[key] = 0;
+      });
+
+      entries.forEach((entry) => {
+        if (entry.category !== "克制与战利品") {
+          return;
+        }
+        const t = new Date(entry.createdAt).getTime();
+        if (t < periodStart || t > periodEnd) {
+          return;
+        }
+        const key = entry.attributeTag || "其他克制";
+        dynamicKeys.add(key);
+        bucket[key] = (bucket[key] || 0) + entry.amount;
+      });
+
+      return {
+        period: period.label,
+        ...bucket
+      };
+    });
+
+    return {
+      data,
+      keys: Array.from(dynamicKeys)
+    };
+  }, [entries, eightWeekTrend.periods]);
+
   const fireProjection = useMemo(() => {
-    const target = (retireMonthlyExpense * 12) / 0.04;
-    const monthlyRate = Math.min(Math.max(annualReturnRate, 0), 5) / 100 / 12;
-    const monthlyContribution = Math.max(monthlyInvest, 0);
+    const target = (retireMonthlyExpenseValue * 12) / 0.04;
+    const monthlyRate = annualReturnRateValue / 100 / 12;
+    const monthlyContribution = monthlyInvestValue;
     const maxMonths = 1200;
 
-    let baseAsset = Math.max(currentSavings, 0);
+    let baseAsset = currentSavingsValue;
     let months = 0;
 
     const series = [
@@ -458,9 +502,9 @@ export default function HomePage() {
       finalAsset: baseAsset,
       chartData: series
     };
-  }, [annualReturnRate, currentSavings, monthlyInvest, retireMonthlyExpense]);
+  }, [annualReturnRateValue, currentSavingsValue, monthlyInvestValue, retireMonthlyExpenseValue]);
 
-  const currentReach = currentSavings;
+  const currentReach = currentSavingsValue;
   const fireProgress = fireProjection.target > 0 ? Math.min(100, (currentReach / fireProjection.target) * 100) : 0;
   const selectedMotive = ALL_MOTIVE_TAGS.find((tag) => tag.id === selectedMotiveId);
   const selectedAttribute = ATTRIBUTE_OPTIONS.find((option) => option.id === selectedAttributeId);
@@ -479,7 +523,6 @@ export default function HomePage() {
     }
 
     setEntries((prev) => [...prev, ...newEntries]);
-    setMessages((prev) => [...prev, { id: buildId("card"), role: "assistant", kind: "entries", entries: newEntries }]);
 
     const emotionalItems = newEntries.filter((entry) => entry.category === "情绪补偿");
     const trophyItems = newEntries.filter((entry) => entry.category === "克制与战利品");
@@ -508,6 +551,24 @@ export default function HomePage() {
 
   function updateEntryCategory(entryId: string, category: Category) {
     setEntries((prev) => prev.map((entry) => (entry.id === entryId ? { ...entry, category } : entry)));
+  }
+
+  function updateEntryNote(entryId: string, note: string) {
+    setEntries((prev) => prev.map((entry) => (entry.id === entryId ? { ...entry, note } : entry)));
+  }
+
+  function updateEntryAmount(entryId: string, amountText: string) {
+    const parsed = Number(amountText);
+    setEntries((prev) =>
+      prev.map((entry) =>
+        entry.id === entryId
+          ? {
+              ...entry,
+              amount: Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+            }
+          : entry
+      )
+    );
   }
 
   function formatEntryTimestamp(iso: string) {
@@ -553,7 +614,7 @@ export default function HomePage() {
       const response = await fetch("/api/review", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "biweekly", summary, monthlySalary })
+        body: JSON.stringify({ mode: "biweekly", summary, monthlySalary: monthlySalaryValue })
       });
 
       const data = (await response.json()) as { report?: string; error?: string; systemPrompt?: string };
@@ -587,7 +648,7 @@ export default function HomePage() {
       const response = await fetch("/api/review", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "biweekly", summary, monthlySalary, conversation, followUp: input })
+        body: JSON.stringify({ mode: "biweekly", summary, monthlySalary: monthlySalaryValue, conversation, followUp: input })
       });
 
       const data = (await response.json()) as { report?: string; error?: string; systemPrompt?: string };
@@ -613,7 +674,7 @@ export default function HomePage() {
       const response = await fetch("/api/review", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "eightWeek", summary: eightWeekTrend.overallSummary, trend: eightWeekTrend, monthlySalary })
+        body: JSON.stringify({ mode: "eightWeek", summary: eightWeekTrend.overallSummary, trend: eightWeekTrend, monthlySalary: monthlySalaryValue })
       });
 
       const data = (await response.json()) as { report?: string; error?: string; systemPrompt?: string };
@@ -646,7 +707,7 @@ export default function HomePage() {
       const response = await fetch("/api/review", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "eightWeek", summary: eightWeekTrend.overallSummary, trend: eightWeekTrend, monthlySalary, conversation, followUp: input })
+        body: JSON.stringify({ mode: "eightWeek", summary: eightWeekTrend.overallSummary, trend: eightWeekTrend, monthlySalary: monthlySalaryValue, conversation, followUp: input })
       });
 
       const data = (await response.json()) as { report?: string; error?: string; systemPrompt?: string };
@@ -694,10 +755,11 @@ export default function HomePage() {
     const finalAttributeTag = recordMode === "saving" ? selectedSavingTag!.label : selectedAttribute!.label;
     const motiveLabel = recordMode === "saving" ? undefined : selectedMotive!.label;
     const realityLabel = recordMode === "saving" ? undefined : selectedReality!.label;
-    const description = tagNote.trim() || `${motiveLabel ? `${motiveLabel} · ` : ""}${finalAttributeTag}${realityLabel ? ` · ${realityLabel}` : ""}`;
+    const description = `${motiveLabel ? `${motiveLabel} · ` : ""}${finalAttributeTag}${realityLabel ? ` · ${realityLabel}` : ""}`;
     const taggedEntry: ExpenseEntry = {
       id: buildId("tag-entry"),
       description,
+      note: tagNote.trim(),
       amount,
       category: finalCategory,
       createdAt: timestamp,
@@ -720,9 +782,9 @@ export default function HomePage() {
   }
 
   const NAV_ITEMS = [
-    { key: "chat" as const, label: "记录" },
+    { key: "chat" as const, label: "记账" },
     { key: "dashboard" as const, label: "复盘" },
-    { key: "fire" as const, label: "目标" }
+    { key: "fire" as const, label: "FIRE目标" }
   ];
 
   return (
@@ -733,39 +795,45 @@ export default function HomePage() {
         </div>
       </header>
 
-      <div className="mx-auto max-w-lg pb-20">
+      <nav className="border-b border-stone-200/60 bg-stone-50/95">
+        <div className="mx-auto flex max-w-lg px-3">
+          {NAV_ITEMS.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setActiveTab(tab.key)}
+              className={`flex-1 py-3 text-[12px] font-medium transition-colors ${
+                activeTab === tab.key ? "text-stone-800" : "text-stone-400"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </nav>
+
+      <div className="mx-auto max-w-lg pb-4">
         {activeTab === "chat" ? (
           <div className="flex min-h-[calc(100dvh-116px)] flex-col bg-white">
             <div className="flex-1 space-y-5 overflow-y-auto px-5 py-6">
               {messages.map((message) => {
-                if (message.kind === "entries") {
-                  return (
-                    <div key={message.id} className="space-y-1">
-                      <p className="text-[11px] font-medium uppercase tracking-wider text-stone-400">已记录</p>
-                      {message.entries.map((entry) => (
-                        <div key={entry.id} className="flex items-baseline justify-between border-b border-stone-100 py-2">
-                          <div>
-                            <p className="text-sm text-stone-600">{entry.description}</p>
-                            <p className="text-[11px] text-stone-400">{entry.category}</p>
-                          </div>
-                          <span className="ml-3 font-mono text-sm tabular-nums text-stone-700">{formatMoney(entry.amount)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  );
-                }
-
                 const isUser = message.role === "user";
+                const displayText =
+                  message.id === "m-hello"
+                    ? recordMode === "expense"
+                      ? EXPENSE_GUIDE_TEXT
+                      : SAVING_GUIDE_TEXT
+                    : message.text;
                 return (
                   <div key={message.id} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
                     <p
-                      className={`max-w-[85%] text-[13px] leading-relaxed ${
+                      className={`max-w-[85%] whitespace-pre-line text-[13px] leading-relaxed ${
                         isUser
                           ? "rounded-2xl rounded-br-md bg-stone-800 px-4 py-2.5 text-stone-100"
                           : "text-stone-500"
                       }`}
                     >
-                      {message.text}
+                      {displayText}
                     </p>
                   </div>
                 );
@@ -944,35 +1012,55 @@ export default function HomePage() {
             <div className="border-t border-stone-100 bg-stone-50/30 px-5 py-5">
               <p className="mb-3 text-[11px] font-medium uppercase tracking-wider text-stone-400">历史</p>
               <div className="max-h-52 space-y-0 overflow-y-auto">
-                {[...entries]
-                  .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-                  .map((entry) => (
-                    <div key={entry.id} className="flex items-center justify-between border-b border-stone-100 py-2.5">
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm text-stone-600">{entry.description}</p>
-                        <div className="mt-0.5 flex items-center gap-2 text-[11px] text-stone-400">
-                          <span>{formatEntryTimestamp(entry.createdAt)}</span>
-                          <select
-                            value={entry.category}
-                            onChange={(event) => updateEntryCategory(entry.id, event.target.value as Category)}
-                            className="border-none bg-transparent text-[11px] text-stone-400 outline-none"
-                          >
-                            {CATEGORY_ORDER.map((category) => (
-                              <option key={category} value={category}>{category}</option>
-                            ))}
-                          </select>
+                {entries.length === 0 ? (
+                  <p className="py-2 text-xs text-stone-400">暂无记录。完成一笔记账后会显示在这里。</p>
+                ) : (
+                  [...entries]
+                    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+                    .map((entry) => (
+                      <div key={entry.id} className="flex items-center justify-between border-b border-stone-100 py-2.5">
+                        <div className="min-w-0 flex-1">
+                          <input
+                            type="text"
+                            value={entry.note ?? ""}
+                            onChange={(event) => updateEntryNote(entry.id, event.target.value)}
+                            placeholder="请为该记录添加备注"
+                            className="w-full truncate border-none bg-transparent p-0 text-sm text-stone-600 outline-none placeholder:text-stone-300"
+                          />
+                          <div className="mt-0.5 flex items-center gap-2 text-[11px] text-stone-400">
+                            <span>{formatEntryTimestamp(entry.createdAt)}</span>
+                            <select
+                              value={entry.category}
+                              onChange={(event) => updateEntryCategory(entry.id, event.target.value as Category)}
+                              className="border-none bg-transparent text-[11px] text-stone-400 outline-none"
+                            >
+                              {CATEGORY_ORDER.map((category) => (
+                                <option key={category} value={category}>
+                                  {category}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          {(entry.motiveTag || entry.attributeTag || entry.realityTag) && (
+                            <p className="mt-0.5 text-[10px] text-stone-300">
+                              {entry.motiveTag || "—"} / {entry.attributeTag || "—"} / {entry.realityTag || "—"}
+                            </p>
+                          )}
                         </div>
-                        {(entry.motiveTag || entry.attributeTag || entry.realityTag) && (
-                          <p className="mt-0.5 text-[10px] text-stone-300">
-                            {entry.motiveTag || "—"} / {entry.attributeTag || "—"} / {entry.realityTag || "—"}
-                          </p>
-                        )}
+                        <input
+                          type="number"
+                          min={0}
+                          step={0.1}
+                          value={entry.amount}
+                          onChange={(event) => updateEntryAmount(entry.id, event.target.value)}
+                          className="ml-3 w-20 border-none bg-transparent p-0 text-right font-mono text-sm tabular-nums text-stone-600 outline-none"
+                        />
                       </div>
-                      <span className="ml-3 font-mono text-sm tabular-nums text-stone-600">{formatMoney(entry.amount)}</span>
-                    </div>
-                  ))}
+                    ))
+                )}
               </div>
             </div>
+
           </div>
         ) : activeTab === "dashboard" ? (
           <div className="min-h-[calc(100dvh-116px)] px-5 py-8">
@@ -1005,6 +1093,9 @@ export default function HomePage() {
                 <>
                   <p className="mt-1 font-mono text-4xl font-extralight tabular-nums tracking-tight text-stone-800">
                     {unconsciousWorkHours.toFixed(1)}<span className="ml-1 text-lg text-stone-400">h</span>
+                  </p>
+                  <p className="mt-2 text-[10px] text-stone-400">
+                    时间负债 = 近14天情绪补偿金额 ÷ 真实时薪，表示你为这部分消费额外付出的工作时间。
                   </p>
                   <p className="mt-3 text-xs text-stone-400">
                     克制努力 {formatMoney(biweeklyTrophyEffort)}
@@ -1074,26 +1165,8 @@ export default function HomePage() {
 
               <div>
                 <p className="mb-3 text-[11px] font-medium uppercase tracking-wider text-stone-400">
-                  {dashboardMode === "biweekly" ? "分类金额" : "周期趋势"}
+                  {dashboardMode === "biweekly" ? "分类金额" : "情绪补偿趋势（折线）"}
                 </p>
-                {dashboardMode === "eightWeek" && (
-                  <div className="mb-3 flex gap-3 text-[11px]">
-                    <button
-                      type="button"
-                      onClick={() => setTrendChartMode("line")}
-                      className={`transition-colors ${trendChartMode === "line" ? "font-medium text-stone-600" : "text-stone-400"}`}
-                    >
-                      折线
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setTrendChartMode("stackedBar")}
-                      className={`transition-colors ${trendChartMode === "stackedBar" ? "font-medium text-stone-600" : "text-stone-400"}`}
-                    >
-                      堆叠
-                    </button>
-                  </div>
-                )}
                 <div className="overflow-x-auto rounded-xl bg-white p-4">
                   {dashboardMode === "biweekly" ? (
                     <BarChart width={chartWidth} height={220} data={pieData}>
@@ -1106,7 +1179,7 @@ export default function HomePage() {
                         ))}
                       </Bar>
                     </BarChart>
-                  ) : trendChartMode === "line" ? (
+                  ) : (
                     <LineChart width={chartWidth} height={220} data={eightWeekTrendData}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
                       <XAxis dataKey="period" tick={{ fontSize: 11, fill: "#a8a29e" }} axisLine={false} tickLine={false} />
@@ -1114,21 +1187,36 @@ export default function HomePage() {
                       <Tooltip formatter={(value) => formatTooltipMoney(value)} />
                       <Legend iconSize={8} wrapperStyle={{ fontSize: 11 }} />
                       <Line type="monotone" dataKey="unconscious" stroke={CATEGORY_COLORS["情绪补偿"]} strokeWidth={2} dot={{ r: 3 }} name="情绪补偿" />
-                      <Line type="monotone" dataKey="trophy" stroke={CATEGORY_COLORS["克制与战利品"]} strokeWidth={2} dot={{ r: 3 }} name="克制" />
                     </LineChart>
-                  ) : (
-                    <BarChart width={chartWidth} height={220} data={eightWeekTrendData}>
+                  )}
+                </div>
+              </div>
+
+              {dashboardMode === "eightWeek" && (
+                <div>
+                  <p className="mb-3 text-[11px] font-medium uppercase tracking-wider text-stone-400">
+                    克制努力（堆叠柱状）
+                  </p>
+                  <div className="overflow-x-auto rounded-xl bg-white p-4">
+                    <BarChart width={chartWidth} height={220} data={eightWeekTrophyStacked.data}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
                       <XAxis dataKey="period" tick={{ fontSize: 11, fill: "#a8a29e" }} axisLine={false} tickLine={false} />
                       <YAxis tick={{ fontSize: 11, fill: "#a8a29e" }} axisLine={false} tickLine={false} />
                       <Tooltip formatter={(value) => formatTooltipMoney(value)} />
                       <Legend iconSize={8} wrapperStyle={{ fontSize: 11 }} />
-                      <Bar dataKey="unconscious" stackId="trend" fill={CATEGORY_COLORS["情绪补偿"]} name="情绪补偿" />
-                      <Bar dataKey="trophy" stackId="trend" fill={CATEGORY_COLORS["克制与战利品"]} name="克制" radius={[4, 4, 0, 0]} />
+                      {eightWeekTrophyStacked.keys.map((key, index) => (
+                        <Bar
+                          key={key}
+                          dataKey={key}
+                          stackId="trophy"
+                          fill={index % 2 === 0 ? "#b6aea2" : "#d0c7bb"}
+                          name={key}
+                        />
+                      ))}
                     </BarChart>
-                  )}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
 
             {dashboardMode === "eightWeek" && (
@@ -1242,12 +1330,6 @@ export default function HomePage() {
               )}
             </div>
 
-            <details className="mb-6">
-              <summary className="cursor-pointer text-[11px] text-stone-300 hover:text-stone-400">System Prompt</summary>
-              <pre className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap text-[10px] leading-5 text-stone-400">
-                {dashboardMode === "biweekly" ? aiSystemPrompt : macroSystemPrompt || "尚未调用。"}
-              </pre>
-            </details>
           </div>
         ) : (
           <div className="min-h-[calc(100dvh-116px)] px-5 py-8">
@@ -1298,54 +1380,58 @@ export default function HomePage() {
             </div>
 
             <div>
-              <p className="mb-4 text-[11px] font-medium uppercase tracking-wider text-stone-400">参数</p>
+              <p className="mb-4 text-[11px] font-medium uppercase tracking-wider text-stone-400">参数（可自行填写）</p>
               <div className="space-y-0">
                 <div className="flex items-center justify-between border-b border-stone-100 py-3">
-                  <span className="text-xs text-stone-500">月薪</span>
+                  <span className="text-xs text-stone-500">月薪（元）</span>
                   <div className="text-right">
                     <input
                       type="number"
                       min={1}
                       value={monthlySalary}
-                      onChange={(event) => setMonthlySalary(Number(event.target.value) || 0)}
+                      onChange={(event) => setMonthlySalary(event.target.value)}
+                      placeholder="在此处填写"
                       className="w-28 border-none bg-transparent text-right font-mono text-sm tabular-nums text-stone-700 outline-none"
                     />
                     <p className="text-[10px] tabular-nums text-stone-400">时薪 {realHourlyWage.toFixed(1)}</p>
                   </div>
                 </div>
                 <div className="flex items-center justify-between border-b border-stone-100 py-3">
-                  <span className="text-xs text-stone-500">现有存款</span>
+                  <span className="text-xs text-stone-500">现有存款（元）</span>
                   <input
                     type="number"
                     min={0}
                     value={currentSavings}
-                    onChange={(event) => setCurrentSavings(Math.max(Number(event.target.value) || 0, 0))}
+                    onChange={(event) => setCurrentSavings(event.target.value)}
+                    placeholder="在此处填写"
                     className="w-28 border-none bg-transparent text-right font-mono text-sm tabular-nums text-stone-700 outline-none"
                   />
                 </div>
                 <div className="flex items-center justify-between border-b border-stone-100 py-3">
-                  <span className="text-xs text-stone-500">月定投</span>
+                  <span className="text-xs text-stone-500">每月预攒钱（元）</span>
                   <input
                     type="number"
                     min={0}
                     value={monthlyInvest}
-                    onChange={(event) => setMonthlyInvest(Math.max(Number(event.target.value) || 0, 0))}
+                    onChange={(event) => setMonthlyInvest(event.target.value)}
+                    placeholder="在此处填写"
                     className="w-28 border-none bg-transparent text-right font-mono text-sm tabular-nums text-stone-700 outline-none"
                   />
                 </div>
                 <div className="flex items-center justify-between border-b border-stone-100 py-3">
-                  <span className="text-xs text-stone-500">退休月支出</span>
+                  <span className="text-xs text-stone-500">月生活成本（元）</span>
                   <input
                     type="number"
                     min={0}
                     value={retireMonthlyExpense}
-                    onChange={(event) => setRetireMonthlyExpense(Math.max(Number(event.target.value) || 0, 0))}
+                    onChange={(event) => setRetireMonthlyExpense(event.target.value)}
+                    placeholder="在此处填写"
                     className="w-28 border-none bg-transparent text-right font-mono text-sm tabular-nums text-stone-700 outline-none"
                   />
                 </div>
                 <div className="flex items-center justify-between py-3">
                   <div>
-                    <span className="text-xs text-stone-500">年化收益率</span>
+                    <span className="text-xs text-stone-500">年化收益率（%）</span>
                     <p className="text-[10px] text-stone-400">建议 2-3% 稳健为准</p>
                   </div>
                   <div className="flex items-baseline gap-0.5">
@@ -1355,10 +1441,8 @@ export default function HomePage() {
                       max={5}
                       step={0.1}
                       value={annualReturnRate}
-                      onChange={(event) => {
-                        const value = Number(event.target.value) || 0;
-                        setAnnualReturnRate(Math.min(Math.max(value, 0), 5));
-                      }}
+                      onChange={(event) => setAnnualReturnRate(event.target.value)}
+                      placeholder="在此处填写"
                       className="w-16 border-none bg-transparent text-right font-mono text-sm tabular-nums text-stone-700 outline-none"
                     />
                     <span className="text-xs text-stone-400">%</span>
@@ -1369,18 +1453,6 @@ export default function HomePage() {
           </div>
         )}
       </div>
-      <nav className="fixed bottom-0 left-1/2 z-30 w-full max-w-[430px] -translate-x-1/2 border-t border-stone-200/80 bg-stone-50/98 backdrop-blur">
-        <div className="mx-auto grid grid-cols-3">
-          {NAV_ITEMS.map((tab) => (
-            <button key={tab.key} type="button" onClick={() => setActiveTab(tab.key)} className="py-2.5">
-              <div className={`mx-auto mb-1 h-0.5 w-6 rounded-full transition ${activeTab === tab.key ? "bg-stone-700" : "bg-transparent"}`} />
-              <p className={`text-[12px] font-medium transition-colors ${activeTab === tab.key ? "text-stone-700" : "text-stone-400"}`}>
-                {tab.label}
-              </p>
-            </button>
-          ))}
-        </div>
-      </nav>
     </div>
   );
 }
