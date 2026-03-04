@@ -192,6 +192,12 @@ function formatMoney(value: number): string {
   return `¥${value.toFixed(value % 1 === 0 ? 0 : 1)}`;
 }
 
+function formatTooltipMoney(value: unknown): string {
+  const raw = Array.isArray(value) ? value[0] : value;
+  const numeric = Number(raw ?? 0);
+  return formatMoney(Number.isFinite(numeric) ? numeric : 0);
+}
+
 function toWorkTime(amount: number, hourlyWage: number) {
   if (hourlyWage <= 0) {
     return { hours: 0, minutes: 0 };
@@ -1060,7 +1066,7 @@ export default function HomePage() {
                         <Cell key={item.name} fill={CATEGORY_COLORS[item.name as Category]} />
                       ))}
                     </Pie>
-                    <Tooltip formatter={(value: number) => formatMoney(Number(value))} />
+                    <Tooltip formatter={(value) => formatTooltipMoney(value)} />
                     <Legend layout="vertical" align="right" verticalAlign="middle" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
                   </PieChart>
                 </div>
@@ -1093,7 +1099,7 @@ export default function HomePage() {
                     <BarChart width={chartWidth} height={220} data={pieData}>
                       <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#a8a29e" }} axisLine={false} tickLine={false} />
                       <YAxis tick={{ fontSize: 11, fill: "#a8a29e" }} axisLine={false} tickLine={false} />
-                      <Tooltip formatter={(value: number) => formatMoney(Number(value))} />
+                      <Tooltip formatter={(value) => formatTooltipMoney(value)} />
                       <Bar dataKey="value" radius={[4, 4, 0, 0]}>
                         {pieData.map((item) => (
                           <Cell key={item.name} fill={CATEGORY_COLORS[item.name as Category]} />
@@ -1105,7 +1111,7 @@ export default function HomePage() {
                       <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
                       <XAxis dataKey="period" tick={{ fontSize: 11, fill: "#a8a29e" }} axisLine={false} tickLine={false} />
                       <YAxis tick={{ fontSize: 11, fill: "#a8a29e" }} axisLine={false} tickLine={false} />
-                      <Tooltip formatter={(value: number) => formatMoney(Number(value))} />
+                      <Tooltip formatter={(value) => formatTooltipMoney(value)} />
                       <Legend iconSize={8} wrapperStyle={{ fontSize: 11 }} />
                       <Line type="monotone" dataKey="unconscious" stroke={CATEGORY_COLORS["情绪补偿"]} strokeWidth={2} dot={{ r: 3 }} name="情绪补偿" />
                       <Line type="monotone" dataKey="trophy" stroke={CATEGORY_COLORS["克制与战利品"]} strokeWidth={2} dot={{ r: 3 }} name="克制" />
@@ -1115,7 +1121,7 @@ export default function HomePage() {
                       <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
                       <XAxis dataKey="period" tick={{ fontSize: 11, fill: "#a8a29e" }} axisLine={false} tickLine={false} />
                       <YAxis tick={{ fontSize: 11, fill: "#a8a29e" }} axisLine={false} tickLine={false} />
-                      <Tooltip formatter={(value: number) => formatMoney(Number(value))} />
+                      <Tooltip formatter={(value) => formatTooltipMoney(value)} />
                       <Legend iconSize={8} wrapperStyle={{ fontSize: 11 }} />
                       <Bar dataKey="unconscious" stackId="trend" fill={CATEGORY_COLORS["情绪补偿"]} name="情绪补偿" />
                       <Bar dataKey="trophy" stackId="trend" fill={CATEGORY_COLORS["克制与战利品"]} name="克制" radius={[4, 4, 0, 0]} />
@@ -1272,7 +1278,7 @@ export default function HomePage() {
                   <CartesianGrid strokeDasharray="3 3" stroke="#e7e5e4" />
                   <XAxis dataKey="year" tick={{ fontSize: 10, fill: "#a8a29e" }} axisLine={false} tickLine={false} />
                   <YAxis tickFormatter={(value) => `${(value / 10000).toFixed(0)}万`} tick={{ fontSize: 10, fill: "#a8a29e" }} axisLine={false} tickLine={false} />
-                  <Tooltip formatter={(value: number) => formatMoney(Number(value))} />
+                  <Tooltip formatter={(value) => formatTooltipMoney(value)} />
                   <ReferenceLine
                     y={fireProjection.target}
                     stroke="#d6d3d1"
