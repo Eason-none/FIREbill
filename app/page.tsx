@@ -29,7 +29,8 @@ const CATEGORY_LABELS = {
 } as const;
 
 const CATEGORY_ORDER = Object.keys(CATEGORY_LABELS) as Category[];
-const STORAGE_KEY_ENTRIES = "fire-assistant-entries-v2";
+const STORAGE_KEY_USER_ID = "fire-assistant-user-id-v1";
+const STORAGE_KEY_REVIEW_REMINDER = "fire-assistant-review-reminder-v1";
 const GOLD_COLOR = "#c4b590";
 const MONTHLY_WORK_HOURS = 21.75 * 8;
 
@@ -210,6 +211,13 @@ function toWorkTime(amount: number, hourlyWage: number) {
   return { hours, minutes };
 }
 
+function buildClientUserId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `u-${crypto.randomUUID()}`;
+  }
+  return `u-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState<"chat" | "dashboard" | "fire">("chat");
   const [dashboardMode, setDashboardMode] = useState<DashboardMode>("biweekly");
@@ -226,7 +234,11 @@ export default function HomePage() {
   const [selectedAttributeId, setSelectedAttributeId] = useState("");
   const [selectedRealityId, setSelectedRealityId] = useState("");
   const [selectedSavingTagId, setSelectedSavingTagId] = useState("");
-  const [hasLoadedEntries, setHasLoadedEntries] = useState(false);
+  const [clientUserId, setClientUserId] = useState("");
+  const [reviewReminderReadCycle, setReviewReminderReadCycle] = useState({
+    biweekly: 0,
+    eightWeek: 0
+  });
   const [reviewSummary, setReviewSummary] = useState<SpendSummary | null>(null);
   const [biweeklyReviewChat, setBiweeklyReviewChat] = useState<ReviewDialogueMessage[]>([]);
   const [biweeklyReviewDraft, setBiweeklyReviewDraft] = useState("");
@@ -249,37 +261,67 @@ export default function HomePage() {
   ]);
 
   useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY_ENTRIES);
-      if (!raw) {
-        setEntries([]);
-        setHasLoadedEntries(true);
-        return;
-      }
-      const parsed = JSON.parse(raw) as ExpenseEntry[];
-      if (Array.isArray(parsed)) {
-        const migrated = parsed.map((entry) => ({
-          ...entry,
-          category: normalizeCategory(String(entry.category || "")),
-          note: typeof (entry as Partial<ExpenseEntry>).note === "string" ? (entry as Partial<ExpenseEntry>).note : ""
-        }));
-        setEntries(migrated);
-      } else {
-        setEntries([]);
-      }
-    } catch {
-      setEntries([]);
-    } finally {
-      setHasLoadedEntries(true);
+    const cached = window.localStorage.getItem(STORAGE_KEY_USER_ID);
+    const nextUserId = cached || buildClientUserId();
+    if (!cached) {
+      window.localStorage.setItem(STORAGE_KEY_USER_ID, nextUserId);
     }
+    setClientUserId(nextUserId);
   }, []);
 
   useEffect(() => {
-    if (!hasLoadedEntries) {
+    if (!clientUserId) {
       return;
     }
-    window.localStorage.setItem(STORAGE_KEY_ENTRIES, JSON.stringify(entries));
-  }, [entries, hasLoadedEntries]);
+    try {
+      const raw = window.localStorage.getItem(`${STORAGE_KEY_REVIEW_REMINDER}-${clientUserId}`);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<{ biweekly: number; eightWeek: number }>;
+        setReviewReminderReadCycle({
+          biweekly: Number(parsed.biweekly || 0),
+          eightWeek: Number(parsed.eightWeek || 0)
+        });
+      } else {
+        setReviewReminderReadCycle({ biweekly: 0, eightWeek: 0 });
+      }
+    } catch {
+      setReviewReminderReadCycle({ biweekly: 0, eightWeek: 0 });
+    }
+  }, [clientUserId]);
+
+  useEffect(() => {
+    if (!clientUserId) {
+      return;
+    }
+    window.localStorage.setItem(
+      `${STORAGE_KEY_REVIEW_REMINDER}-${clientUserId}`,
+      JSON.stringify(reviewReminderReadCycle)
+    );
+  }, [clientUserId, reviewReminderReadCycle]);
+
+  useEffect(() => {
+    if (!clientUserId) {
+      return;
+    }
+    const controller = new AbortController();
+    async function loadEntries() {
+      try {
+        const response = await fetch("/api/entries", {
+          headers: { "x-user-id": clientUserId },
+          signal: controller.signal
+        });
+        const data = (await response.json()) as { entries?: ExpenseEntry[] };
+        if (!response.ok || !Array.isArray(data.entries)) {
+          return;
+        }
+        setEntries(data.entries);
+      } catch {
+        // keep current empty state on load failure
+      }
+    }
+    void loadEntries();
+    return () => controller.abort();
+  }, [clientUserId]);
 
   useEffect(() => {
     const updateViewport = () => setViewportWidth(window.innerWidth);
@@ -301,6 +343,50 @@ export default function HomePage() {
     });
     return base;
   }, [entries]);
+
+  const entrySpanDays = useMemo(() => {
+    if (entries.length < 2) {
+      return 0;
+    }
+    let minTime = Number.POSITIVE_INFINITY;
+    let maxTime = Number.NEGATIVE_INFINITY;
+    entries.forEach((entry) => {
+      const t = new Date(entry.createdAt).getTime();
+      if (!Number.isFinite(t)) {
+        return;
+      }
+      minTime = Math.min(minTime, t);
+      maxTime = Math.max(maxTime, t);
+    });
+    if (!Number.isFinite(minTime) || !Number.isFinite(maxTime) || maxTime < minTime) {
+      return 0;
+    }
+    const dayMs = 24 * 60 * 60 * 1000;
+    return Math.floor((maxTime - minTime) / dayMs);
+  }, [entries]);
+
+  const biweeklyCycle = Math.floor(entrySpanDays / 14);
+  const eightWeekCycle = Math.floor(entrySpanDays / 56);
+  const shouldPromptEightWeekReview = eightWeekCycle >= 1 && eightWeekCycle > reviewReminderReadCycle.eightWeek;
+  const shouldPromptBiweeklyReview =
+    !shouldPromptEightWeekReview &&
+    biweeklyCycle >= 1 &&
+    biweeklyCycle > reviewReminderReadCycle.biweekly;
+
+  function markReviewReminderRead(type: "biweekly" | "eightWeek") {
+    setReviewReminderReadCycle((prev) => {
+      if (type === "eightWeek") {
+        return {
+          biweekly: Math.max(prev.biweekly, biweeklyCycle),
+          eightWeek: Math.max(prev.eightWeek, eightWeekCycle)
+        };
+      }
+      return {
+        ...prev,
+        biweekly: Math.max(prev.biweekly, biweeklyCycle)
+      };
+    });
+  }
 
   const liveSpendSummary = useMemo(
     () => ({
@@ -551,24 +637,58 @@ export default function HomePage() {
 
   function updateEntryCategory(entryId: string, category: Category) {
     setEntries((prev) => prev.map((entry) => (entry.id === entryId ? { ...entry, category } : entry)));
+    if (!clientUserId) {
+      return;
+    }
+    void fetch(`/api/entries/${entryId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "x-user-id": clientUserId
+      },
+      body: JSON.stringify({ category })
+    });
   }
 
   function updateEntryNote(entryId: string, note: string) {
     setEntries((prev) => prev.map((entry) => (entry.id === entryId ? { ...entry, note } : entry)));
+    if (!clientUserId) {
+      return;
+    }
+    void fetch(`/api/entries/${entryId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "x-user-id": clientUserId
+      },
+      body: JSON.stringify({ note })
+    });
   }
 
   function updateEntryAmount(entryId: string, amountText: string) {
     const parsed = Number(amountText);
+    const nextAmount = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
     setEntries((prev) =>
       prev.map((entry) =>
         entry.id === entryId
           ? {
               ...entry,
-              amount: Number.isFinite(parsed) && parsed >= 0 ? parsed : 0
+              amount: nextAmount
             }
           : entry
       )
     );
+    if (!clientUserId) {
+      return;
+    }
+    void fetch(`/api/entries/${entryId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "x-user-id": clientUserId
+      },
+      body: JSON.stringify({ amount: nextAmount })
+    });
   }
 
   function formatEntryTimestamp(iso: string) {
@@ -725,7 +845,7 @@ export default function HomePage() {
     }
   }
 
-  function handleTagSubmit(event: FormEvent) {
+  async function handleTagSubmit(event: FormEvent) {
     event.preventDefault();
     if (recordMode === "expense" && !selectedMotive) {
       pushTextMessage("assistant", "请先选择第一轮动机标签。");
@@ -747,6 +867,10 @@ export default function HomePage() {
     const amount = Number(tagAmount);
     if (Number.isNaN(amount) || amount <= 0) {
       pushTextMessage("assistant", "请输入有效金额。");
+      return;
+    }
+    if (!clientUserId) {
+      pushTextMessage("assistant", "用户状态未初始化，请稍后再试。");
       return;
     }
 
@@ -772,7 +896,34 @@ export default function HomePage() {
       recordMode === "saving"
         ? `省钱记录：${finalAttributeTag} / ${formatMoney(amount)}`
         : `标签记账：${motiveLabel} / ${finalAttributeTag} / ${realityLabel} / ${formatMoney(amount)}`;
-    commitEntriesWithFeedback([taggedEntry], userMessage);
+    try {
+      const response = await fetch("/api/entries", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-user-id": clientUserId
+        },
+        body: JSON.stringify({
+          description: taggedEntry.description,
+          note: taggedEntry.note || "",
+          amount: taggedEntry.amount,
+          category: taggedEntry.category,
+          createdAt: taggedEntry.createdAt,
+          motiveTag: taggedEntry.motiveTag || "",
+          attributeTag: taggedEntry.attributeTag || "",
+          realityTag: taggedEntry.realityTag || ""
+        })
+      });
+      const data = (await response.json()) as { entry?: ExpenseEntry; error?: string };
+      if (!response.ok || !data.entry) {
+        throw new Error(data.error || "创建记录失败");
+      }
+      commitEntriesWithFeedback([data.entry], userMessage);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "云端保存失败";
+      pushTextMessage("assistant", `保存失败：${message}`);
+      return;
+    }
     setTagAmount("");
     setTagNote("");
     setSelectedMotiveId("");
@@ -815,6 +966,63 @@ export default function HomePage() {
       <div className="mx-auto max-w-lg pb-4">
         {activeTab === "chat" ? (
           <div className="flex min-h-[calc(100dvh-116px)] flex-col bg-white">
+            {(shouldPromptBiweeklyReview || shouldPromptEightWeekReview) && (
+              <div className="border-b border-stone-100 bg-stone-50/70 px-5 py-3">
+                {shouldPromptEightWeekReview ? (
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-xs text-stone-600">
+                      你已累计约 {entrySpanDays} 天账单（第 {eightWeekCycle} 轮 8 周），建议进行深度复盘。
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          markReviewReminderRead("eightWeek");
+                          setActiveTab("dashboard");
+                          setDashboardMode("eightWeek");
+                        }}
+                        className="rounded-md border border-stone-300 px-2.5 py-1 text-[11px] text-stone-600"
+                      >
+                        去复盘
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => markReviewReminderRead("eightWeek")}
+                        className="rounded-md border border-stone-200 px-2.5 py-1 text-[11px] text-stone-500"
+                      >
+                        已读
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-xs text-stone-600">
+                      你已累计约 {entrySpanDays} 天账单（第 {biweeklyCycle} 轮双周），建议进行复盘。
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          markReviewReminderRead("biweekly");
+                          setActiveTab("dashboard");
+                          setDashboardMode("biweekly");
+                        }}
+                        className="rounded-md border border-stone-300 px-2.5 py-1 text-[11px] text-stone-600"
+                      >
+                        去复盘
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => markReviewReminderRead("biweekly")}
+                        className="rounded-md border border-stone-200 px-2.5 py-1 text-[11px] text-stone-500"
+                      >
+                        已读
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             <div className="flex-1 space-y-5 overflow-y-auto px-5 py-6">
               {messages.map((message) => {
                 const isUser = message.role === "user";
@@ -863,19 +1071,26 @@ export default function HomePage() {
               </div>
 
               {recordMode === "expense" && (
+                <div className="mb-4 rounded-lg border border-stone-200 bg-white px-3 py-2">
+                  <p className="text-sm font-medium text-stone-600">步骤引导</p>
+                  <p className="mt-1 text-sm text-stone-500">步骤1：先选心理动机 → 步骤2：再选心理属性 → 步骤3：最后选实际类目</p>
+                </div>
+              )}
+
+              {recordMode === "expense" && (
                 <div className="mb-4">
-                  <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-stone-400">心理动机</p>
+                  <p className="mb-2 text-sm font-medium uppercase tracking-wider text-stone-500">心理动机</p>
                   <div className="space-y-2">
                     {MOTIVE_TAG_GROUPS.map((group) => (
                       <div key={group.title}>
-                        <p className="mb-1.5 text-[11px] text-stone-400">{group.title}</p>
+                        <p className="mb-1.5 text-xs text-stone-400">{group.title}</p>
                         <div className="flex flex-wrap gap-1.5">
                           {group.tags.map((tag) => {
                             const active = selectedMotiveId === tag.id;
                             return (
                               <label
                                 key={tag.id}
-                                className={`cursor-pointer select-none rounded-full border px-3 py-1 text-xs transition-all ${
+                                className={`cursor-pointer select-none rounded-full border px-3 py-1.5 text-sm transition-all ${
                                   active
                                     ? "border-stone-600 bg-stone-700 text-white"
                                     : "border-stone-200 text-stone-500 hover:border-stone-300"
@@ -895,7 +1110,7 @@ export default function HomePage() {
 
               {recordMode === "expense" ? (
                 <div className="mb-4">
-                  <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-stone-400">心理属性</p>
+                  <p className="mb-2 text-sm font-medium uppercase tracking-wider text-stone-500">心理属性</p>
                   <div className="grid grid-cols-2 gap-1.5">
                     {ATTRIBUTE_OPTIONS.map((option) => {
                       const active = selectedAttributeId === option.id;
@@ -909,8 +1124,8 @@ export default function HomePage() {
                           }`}
                         >
                           <input type="radio" name="attributeTag" value={option.id} checked={active} onChange={() => setSelectedAttributeId(option.id)} className="sr-only" />
-                          <p className="text-xs font-medium text-stone-600">{option.label}</p>
-                          <p className="text-[10px] text-stone-400">{option.hint}</p>
+                          <p className="text-sm font-medium text-stone-600">{option.label}</p>
+                          <p className="text-xs text-stone-400">{option.hint}</p>
                         </label>
                       );
                     })}
@@ -918,14 +1133,14 @@ export default function HomePage() {
                 </div>
               ) : (
                 <div className="mb-4">
-                  <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-stone-400">克制类型</p>
+                  <p className="mb-2 text-sm font-medium uppercase tracking-wider text-stone-500">克制类型</p>
                   <div className="flex flex-wrap gap-1.5">
                     {SAVING_TAGS.map((tag) => {
                       const active = selectedSavingTagId === tag.id;
                       return (
                         <label
                           key={tag.id}
-                          className={`cursor-pointer select-none rounded-full border px-3 py-1 text-xs transition-all ${
+                          className={`cursor-pointer select-none rounded-full border px-3 py-1.5 text-sm transition-all ${
                             active
                               ? "border-stone-600 bg-stone-700 text-white"
                               : "border-stone-200 text-stone-500 hover:border-stone-300"
@@ -942,18 +1157,18 @@ export default function HomePage() {
 
               {recordMode === "expense" && (
                 <div className="mb-4">
-                  <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-stone-400">实际类目</p>
+                  <p className="mb-2 text-sm font-medium uppercase tracking-wider text-stone-500">实际类目</p>
                   <div className="space-y-2">
                     {REALITY_TAG_GROUPS.map((group) => (
                       <div key={group.title}>
-                        <p className="mb-1.5 text-[11px] text-stone-400">{group.title}</p>
+                        <p className="mb-1.5 text-xs text-stone-400">{group.title}</p>
                         <div className="flex flex-wrap gap-1.5">
                           {group.tags.map((tag) => {
                             const active = selectedRealityId === tag.id;
                             return (
                               <label
                                 key={tag.id}
-                                className={`cursor-pointer select-none rounded-full border px-3 py-1 text-xs transition-all ${
+                                className={`cursor-pointer select-none rounded-full border px-3 py-1.5 text-sm transition-all ${
                                   active
                                     ? "border-stone-600 bg-stone-700 text-white"
                                     : "border-stone-200 text-stone-500 hover:border-stone-300"

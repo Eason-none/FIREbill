@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@cloudbase/node-sdk": "^3.18.0",
     "next": "latest",
     "openai": "^6.25.0",
     "react": "latest",
